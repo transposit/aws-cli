@@ -27,6 +27,8 @@ from s3transfer.subscribers import BaseSubscriber
 from awscli.compat import bytes_print
 from awscli.compat import queue
 
+import json
+
 LOGGER = logging.getLogger(__name__)
 HUMANIZE_SUFFIXES = ('KiB', 'MiB', 'GiB', 'TiB', 'PiB', 'EiB')
 EPOCH_TIME = datetime(1970, 1, 1, tzinfo=tzutc())
@@ -383,34 +385,42 @@ class VersionLister(BucketLister):
     def list_objects(self, bucket, prefix=None, page_size=None,
                      extra_args=None, date=None):
         date = self._date_parser(date)
-        versions = self._client.list_object_versions(
-            Bucket=bucket, Prefix=prefix
-        )
-        for bname in 'Versions', 'DeleteMarkers':
-            block = versions.get(bname, [])
-            for i in block:
-                i['LastModified'] = self._date_parser(i['LastModified'])
-                i['_block'] = bname
-        scope = versions.get("DeleteMarkers", []) + versions.get("Versions", [])
-        keys = set([ mark['Key'] for mark in scope ])
-        for key in keys:
-            mods_before = sorted([
-                mark['LastModified'] 
-                for mark in scope
-                if mark['Key'] == key
-                and mark['LastModified'] <= date
-            ])
-            if mods_before:
-                source_path = bucket + '/' + key
-                content = [
-                    mark 
-                    for mark in scope 
-                    if mark['Key'] == key 
-                    and mark['LastModified'] == mods_before[-1]
-                ][0]
-                if content['_block'] == 'Versions':
-                    del content['_block']
-                    yield source_path, content
+        kwargs = {'Bucket': bucket, 'PaginationConfig': {'PageSize': page_size}}
+        if prefix is not None:
+            kwargs['Prefix'] = prefix
+        if extra_args is not None:
+            kwargs.update(extra_args)
+
+        paginator = self._client.get_paginator('list_object_versions')
+        pages = paginator.paginate(**kwargs)
+
+        for versions in pages:
+             LOGGER.debug('versions %s', json.dumps(versions, indent=4))
+             for bname in 'Versions', 'DeleteMarkers':
+                 block = versions.get(bname, [])
+                 for i in block:
+                     i['LastModified'] = self._date_parser(i['LastModified'])
+                     i['_block'] = bname
+             scope = versions.get("DeleteMarkers", []) + versions.get("Versions", [])
+             keys = set([ mark['Key'] for mark in scope ])
+             for key in keys:
+                 mods_before = sorted([
+                     mark['LastModified']
+                     for mark in scope
+                     if mark['Key'] == key
+                     and mark['LastModified'] <= date
+                 ])
+                 if mods_before:
+                     source_path = bucket + '/' + key
+                     content = [
+                         mark
+                         for mark in scope
+                         if mark['Key'] == key
+                         and mark['LastModified'] == mods_before[-1]
+                     ][0]
+                     if content['_block'] == 'Versions':
+                         del content['_block']
+                         yield source_path, content
 
     def date2version(self, bucket, key, date):
         """Find the most recent version of a single object by date"""
